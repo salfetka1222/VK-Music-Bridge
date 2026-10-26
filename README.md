@@ -11,7 +11,7 @@ The `feature/v2-telegram-library-playlists` branch adds a Telegram button menu, 
 - **⭐ Избранное** shows links saved to favorites.
 - **🎼 Плейлисты** lists playlists; select one to view its saved links.
 
-The VK catalog API is not enabled in this preview. Search still matches URLs in the user's own library. The bot does not download audio; the open-link button opens the exact saved VK URL.
+Catalog search uses VK's official API method `audio.search` when a valid, authorized `VK_ACCESS_TOKEN` is configured. `/search query` searches the catalog; `/searchlinks query` searches the user's saved URLs. API availability depends on VK's permissions for the configured token. Results open the canonical VK track page and can be saved as links. The bot does not download audio.
 
 ## Current features
 
@@ -42,7 +42,7 @@ Requires Python 3.10 or newer.
    On Windows, activate the environment with `.venv\\Scripts\\activate`.
 
 3. Copy `.env.example` to `.env` and set `BOT_TOKEN` to your token.
-4. Start the bot:
+4. If you have an access token obtained through a permitted official VK flow and the required API access, set `VK_ACCESS_TOKEN` in the hosting environment. Do not commit it to GitHub or send it in chat. If `audio.search` is not available for that token, catalog search will report that the API request failed.\n5. Start the bot:
 
    ```bash
    python bot.py
@@ -55,7 +55,7 @@ The SQLite database is created automatically at `data/music_bridge.db` by defaul
 - `/start` — welcome message
 - `/help` — instructions
 - `/library` — latest saved links
-- `/search vk.com` — search saved URLs by part of their address
+- `/search Queen` — search the VK audio catalog (requires an authorized `VK_ACCESS_TOKEN`)\n- `/searchlinks vk.com` — search saved URLs by part of their address
 - `/delete ID` — delete one of your saved links
 
 ## Deploy
