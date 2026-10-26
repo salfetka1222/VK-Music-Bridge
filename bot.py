@@ -5,6 +5,7 @@ It does not download or redistribute audio.
 """
 import asyncio
 import logging
+from html import escape
 from contextlib import contextmanager
 import re
 import sqlite3
@@ -199,12 +200,18 @@ def link_actions_keyboard(user_id: int, link_id: int) -> InlineKeyboardMarkup:
             "SELECT 1 FROM favorites WHERE telegram_user_id = ? AND link_id = ?",
             (user_id, link_id),
         ).fetchone()
+        link = connection.execute(
+            "SELECT url FROM saved_links WHERE telegram_user_id = ? AND id = ?",
+            (user_id, link_id),
+        ).fetchone()
     fav_label = "💔 Убрать из избранного" if row else "⭐ В избранное"
-    return InlineKeyboardMarkup(inline_keyboard=[
+    buttons = [
         [InlineKeyboardButton(text=fav_label, callback_data=f"fav:{link_id}")],
         [InlineKeyboardButton(text="➕ В плейлист", callback_data=f"playlist:add:{link_id}")],
-        [InlineKeyboardButton(text="↗️ Открыть VK", url="https://vk.com")],
-    ])
+    ]
+    if link:
+        buttons.append([InlineKeyboardButton(text="↗️ Открыть ссылку", url=link["url"])])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def show_library(message: Message, user_id: int) -> None:
@@ -384,7 +391,7 @@ async def new_playlist_handler(message: Message) -> None:
     except sqlite3.IntegrityError:
         await message.answer("Плейлист с таким названием уже существует.")
         return
-    await message.answer(f"Плейлист «{name}» создан! 🎼", reply_markup=main_menu_keyboard())
+    await message.answer(f"Плейлист «{escape(name)}» создан! 🎼", reply_markup=main_menu_keyboard())
 
 
 @dp.callback_query(F.data.startswith("playlist:add:"))
@@ -483,7 +490,7 @@ async def playlist_view_callback(callback) -> None:
     if not playlist:
         await callback.message.answer("Плейлист не найден.")
         return
-    lines = [f"<b>🎼 {playlist['name']}</b>"]
+    lines = [f"<b>🎼 {escape(playlist['name'])}</b>"]
     for row in rows:
         safe_url = (row["url"].replace("&", "&amp;")
                     .replace("<", "&lt;").replace(">", "&gt;"))
