@@ -1,6 +1,7 @@
 """VK Music Bridge: save VK music links in a private Telegram chat.
 
-This first version stores links only. It does not download or redistribute audio.
+This version stores links only and searches the user's own saved links.
+It does not download or redistribute audio.
 """
 import asyncio
 import logging
@@ -28,6 +29,8 @@ dp = Dispatcher()
 
 URL_PATTERN = re.compile(r"https?://[^\s<>]+|(?:www\.)?(?:music\.)?(?:m\.)?(?:vk\.com|vk\.ru)/[^\s<>]+", re.IGNORECASE)
 ALLOWED_HOSTS = {"vk.com", "www.vk.com", "m.vk.com", "music.vk.com", "vk.ru", "www.vk.ru"}
+MAX_SEARCH_LENGTH = 80
+MAX_SEARCH_RESULTS = 10
 
 
 def get_connection() -> sqlite3.Connection:
@@ -117,6 +120,24 @@ def get_links(user_id: int, limit: int = 10) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def search_links(user_id: int, query: str, limit: int = MAX_SEARCH_RESULTS) -> list[sqlite3.Row]:
+    """Search only the requesting user's saved URLs; query is always parameterized."""
+    normalized = query.strip()
+    if not normalized or len(normalized) > MAX_SEARCH_LENGTH:
+        return []
+    # Escape SQL LIKE metacharacters so user input is treated literally.
+    escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    with database() as connection:
+        return connection.execute(
+            """
+            SELECT id, url, created_at FROM saved_links
+            WHERE telegram_user_id = ? AND url LIKE ? ESCAPE '!'
+            ORDER BY id DESC LIMIT ?
+            """,
+            (user_id, f"%{escaped}%", min(max(int(limit), 1), MAX_SEARCH_RESULTS)),
+        ).fetchall()
+
+
 def delete_link(user_id: int, link_id: int) -> bool:
     with database() as connection:
         cursor = connection.execute(
@@ -133,15 +154,13 @@ async def start_handler(message: Message) -> None:
         return
     await message.answer(
         "Привет! Я <b>VK Music Bridge</b> 🎵\n\n"
-        "Пока я умею сохранять ссылки на музыку из VK в твою личную библиотеку. "
-        "Отправь мне ссылку на страницу или трек VK — я сохраню её.\n\n"
+        "Отправь ссылку VK — я сохраню её в твою личную библиотеку.\n\n"
         "Команды:\n"
         "/library — последние сохранённые ссылки\n"
+        "/search текст — поиск по твоим сохранённым ссылкам\n"
         "/delete ID — удалить ссылку по её номеру\n"
         "/help — помощь\n\n"
-        "<i>Важно:</i> текущая версия сохраняет ссылки, а не скачивает аудиофайлы. "
-        "Импорт аудио можно добавлять только через разрешённые источники и для контента, "
-        "который разрешено копировать."
+        "<i>Я сохраняю ссылки, а не скачиваю аудиофайлы.</i>"
     )
 
 
@@ -151,10 +170,42 @@ async def help_handler(message: Message) -> None:
         "<b>Как пользоваться</b>\n"
         "1. Пришли ссылку с домена vk.com или vk.ru.\n"
         "2. Я сохраню её в твоей библиотеке.\n"
-        "3. Используй /library, чтобы посмотреть сохранённое.\n"
-        "4. Удали запись командой /delete ID.\n\n"
-        "Сейчас бот сохраняет ссылки и не загружает сами аудиозаписи."
+        "3. /library — посмотреть последние записи.\n"
+        "4. /search текст — найти ссылку по части адреса.\n"
+        "5. /delete ID — удалить запись.\n\n"
+        "Поиск пока работает только по URL в твоей библиотеке, а не по каталогу аудио VK."
     )
+
+
+@dp.message(Command("search"))
+async def search_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("Поиск личной библиотеки доступен только в личном чате.")
+        return
+    if message.from_user is None:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer(
+            "Напиши часть ссылки для поиска.\nПример: <code>/search vk.com</code>\n"
+            "Сейчас поиск работает по адресам в твоей библиотеке."
+        )
+        return
+    query = parts[1].strip()
+    if len(query) > MAX_SEARCH_LENGTH:
+        await message.answer(f"Запрос слишком длинный. Максимум — {MAX_SEARCH_LENGTH} символов.")
+        return
+    rows = search_links(message.from_user.id, query)
+    if not rows:
+        await message.answer("Ничего не найдено в твоей библиотеке. Попробуй другую часть ссылки.")
+        return
+    lines = [f"<b>Результаты поиска:</b> {len(rows)}"]
+    for row in rows:
+        safe_url = (row["url"].replace("&", "&amp;")
+                    .replace("<", "&lt;").replace(">", "&gt;"))
+        lines.append(f"\n<b>ID {row['id']}</b> · {safe_url}")
+    lines.append("\n\nУдалить запись: <code>/delete ID</code>")
+    await message.answer("\n".join(lines), disable_web_page_preview=True)
 
 
 @dp.message(Command("library"))
@@ -171,7 +222,8 @@ async def library_handler(message: Message) -> None:
 
     lines = ["<b>Твоя библиотека</b> (последние 10 ссылок):"]
     for row in rows:
-        safe_url = row["url"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_url = (row["url"].replace("&", "&amp;")
+                    .replace("<", "&lt;").replace(">", "&gt;"))
         lines.append(f"\n<b>ID {row['id']}</b> · {safe_url}")
     lines.append("\n\nУдалить запись: <code>/delete ID</code>")
     await message.answer("\n".join(lines), disable_web_page_preview=True)
@@ -225,15 +277,11 @@ async def text_handler(message: Message) -> None:
     if duplicate_count:
         response.append(f"Уже были в библиотеке: <b>{duplicate_count}</b>.")
     response.append("Посмотреть библиотеку: /library")
-    response.append(
-        "Это пока сохранение ссылок, не загрузка аудио. "
-        "Не отправляй закрытые ссылки или личные данные."
-    )
+    response.append("Поиск по сохранённым ссылкам: <code>/search часть-ссылки</code>")
     await message.answer("\n".join(response), disable_web_page_preview=True)
 
 
 async def main() -> None:
-    # Create the database before polling so startup errors appear immediately.
     with database():
         pass
 
