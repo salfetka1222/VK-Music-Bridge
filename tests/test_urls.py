@@ -96,7 +96,7 @@ class PlaylistAndFavoriteTests(unittest.TestCase):
                 (self.link_id,),
             ).fetchone()
             self.assertEqual(row["telegram_user_id"], self.user_a)
-            self.assertEqual(row["url"], "https://vk.com/audio/playlist-test")
+            self.assertEqual(row["url"], f"https://vk.com/audio/playlist-test-{self._testMethodName}")
             tables = {
                 r["name"] for r in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
