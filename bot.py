@@ -5,6 +5,7 @@ It does not download or redistribute audio.
 """
 import asyncio
 import logging
+import os
 from html import escape
 from contextlib import contextmanager
 import re
@@ -19,6 +20,9 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import BOT_TOKEN, DATABASE_PATH
+from vk_catalog import VKCatalogError, search_vk_audio, track_url
+
+VK_ACCESS_TOKEN = os.getenv('VK_ACCESS_TOKEN', '').strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -310,8 +314,9 @@ async def menu_callback(callback) -> None:
         )
     elif action == "search":
         await callback.message.answer(
-            "Пришли команду <code>/search часть-ссылки</code>. "
-            "Поиск по названию и исполнителю подключим после появления разрешённого API.",
+            "🔎 Напиши название песни или исполнителя командой "
+            "<code>/search запрос</code>. Например: <code>/search Queen</code>.\\n"
+            "Для поиска по старым сохранённым ссылкам используй /searchlinks.",
             reply_markup=main_menu_keyboard(),
         )
     elif action == "help":
@@ -528,8 +533,8 @@ async def help_handler(message: Message) -> None:
     , reply_markup=main_menu_keyboard())
 
 
-@dp.message(Command("search"))
-async def search_handler(message: Message) -> None:
+@dp.message(Command("searchlinks"))
+async def search_links_handler(message: Message) -> None:
     if message.chat.type != "private":
         await message.answer("Поиск личной библиотеки доступен только в личном чате.")
         return
@@ -537,10 +542,7 @@ async def search_handler(message: Message) -> None:
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2 or not parts[1].strip():
-        await message.answer(
-            "Напиши часть ссылки для поиска.\nПример: <code>/search vk.com</code>\n"
-            "Сейчас поиск работает по адресам в твоей библиотеке."
-        )
+        await message.answer("Пример: <code>/searchlinks vk.com</code>")
         return
     query = parts[1].strip()
     if len(query) > MAX_SEARCH_LENGTH:
@@ -548,16 +550,74 @@ async def search_handler(message: Message) -> None:
         return
     rows = search_links(message.from_user.id, query)
     if not rows:
-        await message.answer("Ничего не найдено в твоей библиотеке. Попробуй другую часть ссылки.")
+        await message.answer("Ничего не найдено в твоей библиотеке.")
         return
-    lines = [f"<b>Результаты поиска:</b> {len(rows)}"]
+    lines = [f"<b>Результаты в библиотеке:</b> {len(rows)}"]
     for row in rows:
-        safe_url = (row["url"].replace("&", "&amp;")
-                    .replace("<", "&lt;").replace(">", "&gt;"))
-        lines.append(f"\n<b>ID {row['id']}</b> · {safe_url}")
-    lines.append("\n\nУдалить запись: <code>/delete ID</code>")
-    await message.answer("\n".join(lines), disable_web_page_preview=True)
+        safe_url = (row["url"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        lines.append(f"\\n<b>ID {row['id']}</b> · {safe_url}")
+    lines.append("\\n\\nУдалить запись: <code>/delete ID</code>")
+    await message.answer("\\n".join(lines), disable_web_page_preview=True)
 
+
+@dp.message(Command("search"))
+async def search_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("Поиск музыки доступен только в личном чате.")
+        return
+    if message.from_user is None:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer("Напиши название трека или исполнителя. Пример: <code>/search Queen</code>")
+        return
+    query = parts[1].strip()
+    if len(query) > MAX_SEARCH_LENGTH:
+        await message.answer(f"Запрос слишком длинный. Максимум — {MAX_SEARCH_LENGTH} символов.")
+        return
+    if not VK_ACCESS_TOKEN:
+        await message.answer("Поиск по каталогу VK не настроен: добавь переменную <code>VK_ACCESS_TOKEN</code> на хостинге. Нужен токен, полученный разрешённым официальным способом; токен Telegram не подходит. Старые ссылки ищи через <code>/searchlinks запрос</code>.")
+        return
+    await message.answer("🔎 Ищу в каталоге VK…")
+    try:
+        tracks = await asyncio.to_thread(search_vk_audio, query, VK_ACCESS_TOKEN)
+    except VKCatalogError as exc:
+        logger.warning("VK catalog search failed: %s", exc)
+        await message.answer("VK API не выполнил поиск. Возможно, audio.search недоступен этому токену или возникла временная ошибка. Проверь разрешённость доступа и попробуй позже.")
+        return
+    if not tracks:
+        await message.answer("По этому запросу ничего не найдено в каталоге VK.")
+        return
+    await message.answer(f"🎵 Найдено записей: <b>{len(tracks)}</b>")
+    for track in tracks:
+        title, artist = escape(track["title"]), escape(track["artist"])
+        url = track_url(track["owner_id"], track["id"])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↗️ Открыть в VK", url=url)],
+            [InlineKeyboardButton(text="➕ Сохранить в библиотеку", callback_data=f"music:save:{track['owner_id']}:{track['id']}")],
+        ])
+        duration = track.get("duration", 0)
+        duration_text = f" · {duration // 60}:{duration % 60:02d}" if duration else ""
+        await message.answer(f"<b>{title}</b>\\n{artist}{duration_text}", reply_markup=keyboard, disable_web_page_preview=True)
+
+
+@dp.callback_query(F.data.startswith("music:save:"))
+async def save_music_result_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Доступно только в личном чате.", show_alert=True)
+        return
+    try:
+        _, _, owner_id, audio_id = callback.data.split(":")
+        url = track_url(int(owner_id), int(audio_id))
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректная запись.", show_alert=True)
+        return
+    was_saved, link_id = save_link(callback.from_user.id, url)
+    await callback.answer("Трек сохранён в библиотеку 🎵" if was_saved else "Этот трек уже есть в библиотеке.")
+    await callback.message.answer(f"Ссылка на трек: <code>{url}</code>\\nID в библиотеке: <b>{link_id}</b>", reply_markup=link_actions_keyboard(callback.from_user.id, link_id), disable_web_page_preview=True)
 
 @dp.message(Command("library"))
 async def library_handler(message: Message) -> None:
@@ -617,7 +677,8 @@ async def text_handler(message: Message) -> None:
     if duplicate_count:
         response.append(f"Уже были в библиотеке: <b>{duplicate_count}</b>.")
     response.append("Посмотреть библиотеку: /library")
-    response.append("Поиск по сохранённым ссылкам: <code>/search часть-ссылки</code>")
+    response.append("Поиск музыки: <code>/search название или исполнитель</code>")
+    response.append("Поиск сохранённых ссылок: <code>/searchlinks часть-ссылки</code>")
     await message.answer("\n".join(response), disable_web_page_preview=True)
 
 
