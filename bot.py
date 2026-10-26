@@ -39,6 +39,7 @@ def get_connection() -> sqlite3.Connection:
     path = Path(DATABASE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys = ON")
     connection.row_factory = sqlite3.Row
     connection.execute(
         """
