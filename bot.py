@@ -126,12 +126,12 @@ def search_links(user_id: int, query: str, limit: int = MAX_SEARCH_RESULTS) -> l
     if not normalized or len(normalized) > MAX_SEARCH_LENGTH:
         return []
     # Escape SQL LIKE metacharacters so user input is treated literally.
-    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
     with database() as connection:
         return connection.execute(
             """
             SELECT id, url, created_at FROM saved_links
-            WHERE telegram_user_id = ? AND url LIKE ? ESCAPE '\\'
+            WHERE telegram_user_id = ? AND url LIKE ? ESCAPE '!'
             ORDER BY id DESC LIMIT ?
             """,
             (user_id, f"%{escaped}%", min(max(int(limit), 1), MAX_SEARCH_RESULTS)),
