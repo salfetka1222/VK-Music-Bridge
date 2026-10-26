@@ -84,7 +84,9 @@ class PlaylistAndFavoriteTests(unittest.TestCase):
     def setUp(self):
         self.user_a = 3003
         self.user_b = 4004
-        self.added, self.link_id = save_link(self.user_a, "https://vk.com/audio/playlist-test")
+        # Use a distinct URL per test because the temporary SQLite database is shared by the test run.
+        test_url = f"https://vk.com/audio/playlist-test-{self._testMethodName}"
+        self.added, self.link_id = save_link(self.user_a, test_url)
         self.assertTrue(self.added)
 
     def test_additive_schema_preserves_existing_link(self):
