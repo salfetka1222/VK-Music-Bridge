@@ -2,6 +2,17 @@
 
 Telegram bot for keeping VK music links organized in a private Telegram chat.
 
+## VK Music Bridge 2.0 preview (feature branch)
+
+The `feature/v2-telegram-library-playlists` branch adds a Telegram button menu, per-user favorites, and per-user playlists. Existing `saved_links` rows and IDs are preserved; new tables are created additively (`favorites`, `playlists`, `playlist_links`).
+
+- `/newplaylist Name` creates a playlist (name length up to 40 characters).
+- Open **📚 Библиотека** from `/start`, then use each link's buttons to favorite it or add it to a playlist.
+- **⭐ Избранное** shows links saved to favorites.
+- **🎼 Плейлисты** lists playlists; select one to view its saved links.
+
+The VK catalog API is not enabled in this preview. Search still matches URLs in the user's own library. The bot does not download audio; the open-link button opens the exact saved VK URL.
+
 ## Current features
 
 - Responds to `/start` and `/help`.
