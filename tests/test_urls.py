@@ -7,7 +7,7 @@ _temp_dir = tempfile.TemporaryDirectory()
 os.environ.setdefault("BOT_TOKEN", "test-token-not-for-real-use")
 os.environ["DATABASE_PATH"] = os.path.join(_temp_dir.name, "test.db")
 
-from bot import extract_vk_links, normalize_vk_url, save_link, search_links  # noqa: E402
+from bot import (database, extract_vk_links, get_favorites, get_playlists, normalize_vk_url, save_link, search_links)  # noqa: E402
 
 
 class VKURLTests(unittest.TestCase):
@@ -78,6 +78,47 @@ class LibrarySearchTests(unittest.TestCase):
         rows = search_links(self.user_a, "a!b\\\\c")
         self.assertEqual([row["url"] for row in rows], [url])
 
+
+
+class PlaylistAndFavoriteTests(unittest.TestCase):
+    def setUp(self):
+        self.user_a = 3003
+        self.user_b = 4004
+        self.added, self.link_id = save_link(self.user_a, "https://vk.com/audio/playlist-test")
+        self.assertTrue(self.added)
+
+    def test_additive_schema_preserves_existing_link(self):
+        with database() as connection:
+            row = connection.execute(
+                "SELECT telegram_user_id, url FROM saved_links WHERE id = ?",
+                (self.link_id,),
+            ).fetchone()
+            self.assertEqual(row["telegram_user_id"], self.user_a)
+            self.assertEqual(row["url"], "https://vk.com/audio/playlist-test")
+            tables = {
+                r["name"] for r in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        self.assertTrue({"saved_links", "favorites", "playlists", "playlist_links"} <= tables)
+
+    def test_favorites_are_scoped_to_user(self):
+        with database() as connection:
+            connection.execute(
+                "INSERT INTO favorites (telegram_user_id, link_id) VALUES (?, ?)",
+                (self.user_a, self.link_id),
+            )
+        self.assertEqual([r["id"] for r in get_favorites(self.user_a)], [self.link_id])
+        self.assertEqual(get_favorites(self.user_b), [])
+
+    def test_playlists_are_scoped_to_user(self):
+        with database() as connection:
+            connection.execute(
+                "INSERT INTO playlists (telegram_user_id, name) VALUES (?, ?)",
+                (self.user_a, "Test playlist"),
+            )
+        self.assertEqual([r["name"] for r in get_playlists(self.user_a)], ["Test playlist"])
+        self.assertEqual(get_playlists(self.user_b), [])
 
 if __name__ == "__main__":
     unittest.main()
