@@ -4,6 +4,7 @@ This first version stores links only. It does not download or redistribute audio
 """
 import asyncio
 import logging
+from contextlib import contextmanager
 import re
 import sqlite3
 from pathlib import Path
@@ -30,7 +31,7 @@ ALLOWED_HOSTS = {"vk.com", "www.vk.com", "m.vk.com", "music.vk.com", "vk.ru", "w
 
 
 def get_connection() -> sqlite3.Connection:
-    """Open a short-lived SQLite connection and ensure the schema exists."""
+    """Open a SQLite connection and ensure the schema exists."""
     path = Path(DATABASE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
@@ -48,6 +49,20 @@ def get_connection() -> sqlite3.Connection:
     )
     connection.commit()
     return connection
+
+
+@contextmanager
+def database():
+    """Commit successful operations and always close the SQLite connection."""
+    connection = get_connection()
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def normalize_vk_url(raw_url: str) -> str | None:
@@ -78,7 +93,7 @@ def extract_vk_links(text: str) -> list[str]:
 
 
 def save_link(user_id: int, url: str) -> tuple[bool, int]:
-    with get_connection() as connection:
+    with database() as connection:
         cursor = connection.execute(
             "INSERT OR IGNORE INTO saved_links (telegram_user_id, url) VALUES (?, ?)",
             (user_id, url),
@@ -91,7 +106,7 @@ def save_link(user_id: int, url: str) -> tuple[bool, int]:
 
 
 def get_links(user_id: int, limit: int = 10) -> list[sqlite3.Row]:
-    with get_connection() as connection:
+    with database() as connection:
         return connection.execute(
             """
             SELECT id, url, created_at FROM saved_links
@@ -103,7 +118,7 @@ def get_links(user_id: int, limit: int = 10) -> list[sqlite3.Row]:
 
 
 def delete_link(user_id: int, link_id: int) -> bool:
-    with get_connection() as connection:
+    with database() as connection:
         cursor = connection.execute(
             "DELETE FROM saved_links WHERE telegram_user_id = ? AND id = ?",
             (user_id, link_id),
@@ -213,7 +228,7 @@ async def text_handler(message: Message) -> None:
 
 async def main() -> None:
     # Create the database before polling so startup errors appear immediately.
-    with get_connection():
+    with database():
         pass
 
     bot = Bot(
