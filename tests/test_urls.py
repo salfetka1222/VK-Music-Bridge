@@ -72,5 +72,12 @@ class LibrarySearchTests(unittest.TestCase):
         self.assertEqual(search_links(self.user_a, "%_real")[0]["url"], "https://vk.com/track/100%_real")
 
 
+    def test_like_escape_character_and_backslash_are_treated_literally(self):
+        url = "https://vk.com/track/a!b\\\\c"
+        save_link(self.user_a, url)
+        rows = search_links(self.user_a, "a!b\\\\c")
+        self.assertEqual([row["url"] for row in rows], [url])
+
+
 if __name__ == "__main__":
     unittest.main()
