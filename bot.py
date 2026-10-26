@@ -15,7 +15,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import BOT_TOKEN, DATABASE_PATH
 
@@ -47,6 +47,41 @@ def get_connection() -> sqlite3.Connection:
             url TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(telegram_user_id, url)
+        )
+        """
+    )
+    # Additive schema only: existing saved_links rows and IDs are never rewritten.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS favorites (
+            telegram_user_id INTEGER NOT NULL,
+            link_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (telegram_user_id, link_id),
+            FOREIGN KEY (link_id) REFERENCES saved_links(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (telegram_user_id, name)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS playlist_links (
+            playlist_id INTEGER NOT NULL,
+            link_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (playlist_id, link_id),
+            FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+            FOREIGN KEY (link_id) REFERENCES saved_links(id) ON DELETE CASCADE
         )
         """
     )
@@ -147,20 +182,327 @@ def delete_link(user_id: int, link_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Поиск по библиотеке", callback_data="menu:search"),
+         InlineKeyboardButton(text="📚 Библиотека", callback_data="menu:library")],
+        [InlineKeyboardButton(text="⭐ Избранное", callback_data="menu:favorites"),
+         InlineKeyboardButton(text="🎼 Плейлисты", callback_data="menu:playlists")],
+        [InlineKeyboardButton(text="❔ Помощь", callback_data="menu:help")],
+    ])
+
+
+def link_actions_keyboard(user_id: int, link_id: int) -> InlineKeyboardMarkup:
+    with database() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM favorites WHERE telegram_user_id = ? AND link_id = ?",
+            (user_id, link_id),
+        ).fetchone()
+    fav_label = "💔 Убрать из избранного" if row else "⭐ В избранное"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=fav_label, callback_data=f"fav:{link_id}")],
+        [InlineKeyboardButton(text="➕ В плейлист", callback_data=f"playlist:add:{link_id}")],
+        [InlineKeyboardButton(text="↗️ Открыть VK", url="https://vk.com")],
+    ])
+
+
+async def show_library(message: Message, user_id: int) -> None:
+    rows = get_links(user_id)
+    if not rows:
+        await message.answer(
+            "Библиотека пока пуста. Пришли ссылку VK, чтобы сохранить её.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    await message.answer("<b>Твоя библиотека</b> · последние 10 ссылок")
+    for row in rows:
+        safe_url = (row["url"].replace("&", "&amp;")
+                    .replace("<", "&lt;").replace(">", "&gt;"))
+        await message.answer(
+            f"<b>ID {row['id']}</b>\n{safe_url}\n\n"
+            "Можно добавить запись в избранное или плейлист.",
+            reply_markup=link_actions_keyboard(user_id, int(row["id"])),
+            disable_web_page_preview=True,
+        )
+    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+
+
+def get_favorites(user_id: int) -> list[sqlite3.Row]:
+    with database() as connection:
+        return connection.execute(
+            """
+            SELECT s.id, s.url, s.created_at
+            FROM saved_links s JOIN favorites f ON f.link_id = s.id
+            WHERE f.telegram_user_id = ? AND s.telegram_user_id = ?
+            ORDER BY f.created_at DESC LIMIT 20
+            """, (user_id, user_id)
+        ).fetchall()
+
+
+def get_playlists(user_id: int) -> list[sqlite3.Row]:
+    with database() as connection:
+        return connection.execute(
+            "SELECT id, name FROM playlists WHERE telegram_user_id = ? ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+
+
+def playlist_keyboard(playlists: list[sqlite3.Row], link_id: int | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    for playlist in playlists:
+        if link_id is None:
+            rows.append([InlineKeyboardButton(
+                text=f"🎼 {playlist['name']}",
+                callback_data=f"playlist:view:{playlist['id']}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                text=f"➕ {playlist['name']}",
+                callback_data=f"playlist:put:{playlist['id']}:{link_id}",
+            )])
+    rows.append([InlineKeyboardButton(text="📚 В меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("menu:"))
+async def menu_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Открой меню в личном чате.", show_alert=True)
+        return
+    action = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    await callback.answer()
+    if action == "home":
+        await callback.message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+    elif action == "library":
+        await show_library(callback.message, user_id)
+    elif action == "favorites":
+        rows = get_favorites(user_id)
+        if not rows:
+            await callback.message.answer("Избранное пока пусто.", reply_markup=main_menu_keyboard())
+            return
+        for row in rows:
+            safe_url = (row["url"].replace("&", "&amp;")
+                        .replace("<", "&lt;").replace(">", "&gt;"))
+            await callback.message.answer(
+                f"<b>ID {row['id']}</b>\n{safe_url}",
+                reply_markup=link_actions_keyboard(user_id, int(row["id"])),
+                disable_web_page_preview=True,
+            )
+    elif action == "playlists":
+        playlists = get_playlists(user_id)
+        await callback.message.answer(
+            "🎼 <b>Твои плейлисты</b>\n"
+            "Создать новый: <code>/newplaylist Название</code>",
+            reply_markup=playlist_keyboard(playlists),
+        )
+    elif action == "search":
+        await callback.message.answer(
+            "Пришли команду <code>/search часть-ссылки</code>. "
+            "Поиск по названию и исполнителю подключим после появления разрешённого API.",
+            reply_markup=main_menu_keyboard(),
+        )
+    elif action == "help":
+        await callback.message.answer(
+            "Пришли ссылку VK — она сохранится в библиотеке.\n"
+            "/newplaylist Название — создать плейлист.\n"
+            "/search текст — найти сохранённую ссылку.\n"
+            "/delete ID — удалить ссылку.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+@dp.callback_query(F.data.startswith("fav:"))
+async def favorite_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Доступно только в личном чате.", show_alert=True)
+        return
+    try:
+        link_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная запись.", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    with database() as connection:
+        owned = connection.execute(
+            "SELECT 1 FROM saved_links WHERE id = ? AND telegram_user_id = ?",
+            (link_id, user_id),
+        ).fetchone()
+        if not owned:
+            await callback.answer("Запись не найдена в твоей библиотеке.", show_alert=True)
+            return
+        exists = connection.execute(
+            "SELECT 1 FROM favorites WHERE telegram_user_id = ? AND link_id = ?",
+            (user_id, link_id),
+        ).fetchone()
+        if exists:
+            connection.execute(
+                "DELETE FROM favorites WHERE telegram_user_id = ? AND link_id = ?",
+                (user_id, link_id),
+            )
+            text = "Удалено из избранного."
+        else:
+            connection.execute(
+                "INSERT OR IGNORE INTO favorites (telegram_user_id, link_id) VALUES (?, ?)",
+                (user_id, link_id),
+            )
+            text = "Добавлено в избранное ⭐"
+    await callback.answer(text)
+    await callback.message.edit_reply_markup(
+        reply_markup=link_actions_keyboard(user_id, link_id)
+    )
+
+
+@dp.message(Command("newplaylist"))
+async def new_playlist_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("Создавать плейлисты можно только в личном чате.")
+        return
+    if message.from_user is None:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Укажи название: <code>/newplaylist Ночной вайб</code>")
+        return
+    name = parts[1].strip()
+    if not name or len(name) > 40 or any(ord(ch) < 32 for ch in name):
+        await message.answer("Название должно содержать от 1 до 40 обычных символов.")
+        return
+    try:
+        with database() as connection:
+            connection.execute(
+                "INSERT INTO playlists (telegram_user_id, name) VALUES (?, ?)",
+                (message.from_user.id, name),
+            )
+    except sqlite3.IntegrityError:
+        await message.answer("Плейлист с таким названием уже существует.")
+        return
+    await message.answer(f"Плейлист «{name}» создан! 🎼", reply_markup=main_menu_keyboard())
+
+
+@dp.callback_query(F.data.startswith("playlist:add:"))
+async def playlist_add_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Доступно только в личном чате.", show_alert=True)
+        return
+    try:
+        link_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная запись.", show_alert=True)
+        return
+    with database() as connection:
+        owned = connection.execute(
+            "SELECT 1 FROM saved_links WHERE id = ? AND telegram_user_id = ?",
+            (link_id, callback.from_user.id),
+        ).fetchone()
+    if not owned:
+        await callback.answer("Эта ссылка не принадлежит твоей библиотеке.", show_alert=True)
+        return
+    playlists = get_playlists(callback.from_user.id)
+    await callback.answer()
+    if not playlists:
+        await callback.message.answer(
+            "Сначала создай плейлист командой <code>/newplaylist Название</code>."
+        )
+        return
+    await callback.message.answer("Выбери плейлист:", reply_markup=playlist_keyboard(playlists, link_id))
+
+
+@dp.callback_query(F.data.startswith("playlist:put:"))
+async def playlist_put_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Доступно только в личном чате.", show_alert=True)
+        return
+    try:
+        _, _, playlist_id, link_id = callback.data.split(":")
+        playlist_id, link_id = int(playlist_id), int(link_id)
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    with database() as connection:
+        owned_playlist = connection.execute(
+            "SELECT 1 FROM playlists WHERE id = ? AND telegram_user_id = ?",
+            (playlist_id, user_id),
+        ).fetchone()
+        owned_link = connection.execute(
+            "SELECT 1 FROM saved_links WHERE id = ? AND telegram_user_id = ?",
+            (link_id, user_id),
+        ).fetchone()
+        if not owned_playlist or not owned_link:
+            await callback.answer("Плейлист или ссылка не найдены.", show_alert=True)
+            return
+        connection.execute(
+            "INSERT OR IGNORE INTO playlist_links (playlist_id, link_id) VALUES (?, ?)",
+            (playlist_id, link_id),
+        )
+    await callback.answer("Добавлено в плейлист 🎼")
+
+
+@dp.callback_query(F.data.startswith("playlist:view:"))
+async def playlist_view_callback(callback) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Доступно только в личном чате.", show_alert=True)
+        return
+    try:
+        playlist_id = int(callback.data.rsplit(":", 1)[1])
+    except ValueError:
+        await callback.answer("Некорректный плейлист.", show_alert=True)
+        return
+    with database() as connection:
+        playlist = connection.execute(
+            "SELECT name FROM playlists WHERE id = ? AND telegram_user_id = ?",
+            (playlist_id, callback.from_user.id),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT s.id, s.url FROM saved_links s
+            JOIN playlist_links p ON p.link_id = s.id
+            JOIN playlists pl ON pl.id = p.playlist_id
+            WHERE pl.id = ? AND pl.telegram_user_id = ? AND s.telegram_user_id = ?
+            ORDER BY p.created_at DESC LIMIT 30
+            """, (playlist_id, callback.from_user.id, callback.from_user.id)
+        ).fetchall() if playlist else []
+    await callback.answer()
+    if not playlist:
+        await callback.message.answer("Плейлист не найден.")
+        return
+    lines = [f"<b>🎼 {playlist['name']}</b>"]
+    for row in rows:
+        safe_url = (row["url"].replace("&", "&amp;")
+                    .replace("<", "&lt;").replace(">", "&gt;"))
+        lines.append(f"\n<b>ID {row['id']}</b> · {safe_url}")
+    if not rows:
+        lines.append("\nПока пусто — добавь ссылки через библиотеку.")
+    await callback.message.answer("\n".join(lines), disable_web_page_preview=True,
+                                  reply_markup=main_menu_keyboard())
+
 @dp.message(CommandStart())
 async def start_handler(message: Message) -> None:
     if message.chat.type != "private":
         await message.answer("Открой меня в личном чате, чтобы сохранять свои ссылки.")
         return
     await message.answer(
-        "Привет! Я <b>VK Music Bridge</b> 🎵\n\n"
-        "Отправь ссылку VK — я сохраню её в твою личную библиотеку.\n\n"
-        "Команды:\n"
-        "/library — последние сохранённые ссылки\n"
-        "/search текст — поиск по твоим сохранённым ссылкам\n"
-        "/delete ID — удалить ссылку по её номеру\n"
-        "/help — помощь\n\n"
-        "<i>Я сохраняю ссылки, а не скачиваю аудиофайлы.</i>"
+        "Привет! Я <b>VK Music Bridge 2.0</b> 🎵\n\n"
+        "Отправь ссылку VK, чтобы сохранить её. Используй меню для библиотеки, избранного и плейлистов.\n\n"
+        "<i>Пока я сохраняю ссылки и не скачиваю аудио.</i>",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -173,8 +515,9 @@ async def help_handler(message: Message) -> None:
         "3. /library — посмотреть последние записи.\n"
         "4. /search текст — найти ссылку по части адреса.\n"
         "5. /delete ID — удалить запись.\n\n"
-        "Поиск пока работает только по URL в твоей библиотеке, а не по каталогу аудио VK."
-    )
+        "Поиск пока работает только по URL в твоей библиотеке, а не по каталогу аудио VK.\n\n"
+        "/newplaylist Название — создать плейлист."
+    , reply_markup=main_menu_keyboard())
 
 
 @dp.message(Command("search"))
@@ -215,18 +558,7 @@ async def library_handler(message: Message) -> None:
         return
     if message.from_user is None:
         return
-    rows = get_links(message.from_user.id)
-    if not rows:
-        await message.answer("Библиотека пока пуста. Пришли ссылку VK, чтобы сохранить её.")
-        return
-
-    lines = ["<b>Твоя библиотека</b> (последние 10 ссылок):"]
-    for row in rows:
-        safe_url = (row["url"].replace("&", "&amp;")
-                    .replace("<", "&lt;").replace(">", "&gt;"))
-        lines.append(f"\n<b>ID {row['id']}</b> · {safe_url}")
-    lines.append("\n\nУдалить запись: <code>/delete ID</code>")
-    await message.answer("\n".join(lines), disable_web_page_preview=True)
+    await show_library(message, message.from_user.id)
 
 
 @dp.message(Command("delete"))
