@@ -159,6 +159,9 @@ async def help_handler(message: Message) -> None:
 
 @dp.message(Command("library"))
 async def library_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("Открой меня в личном чате, чтобы посмотреть свою библиотеку.")
+        return
     if message.from_user is None:
         return
     rows = get_links(message.from_user.id)
@@ -176,6 +179,9 @@ async def library_handler(message: Message) -> None:
 
 @dp.message(Command("delete"))
 async def delete_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        await message.answer("Удалять ссылки можно только в личном чате со мной.")
+        return
     if message.from_user is None:
         return
     parts = (message.text or "").split(maxsplit=1)
