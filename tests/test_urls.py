@@ -1,14 +1,13 @@
-"""Tests for VK link validation and extraction."""
+"""Tests for VK URL handling and per-user library search."""
 import os
 import tempfile
 import unittest
 
-# Set configuration before importing the bot module.
 _temp_dir = tempfile.TemporaryDirectory()
 os.environ.setdefault("BOT_TOKEN", "test-token-not-for-real-use")
 os.environ["DATABASE_PATH"] = os.path.join(_temp_dir.name, "test.db")
 
-from bot import extract_vk_links, normalize_vk_url  # noqa: E402
+from bot import extract_vk_links, normalize_vk_url, save_link, search_links  # noqa: E402
 
 
 class VKURLTests(unittest.TestCase):
@@ -46,6 +45,31 @@ class VKURLTests(unittest.TestCase):
             extract_vk_links("Link: https://vk.com/artist."),
             ["https://vk.com/artist"],
         )
+
+
+class LibrarySearchTests(unittest.TestCase):
+    def setUp(self):
+        self.user_a = 1001
+        self.user_b = 2002
+        save_link(self.user_a, "https://vk.com/artist/alpha")
+        save_link(self.user_a, "https://music.vk.com/track/123")
+        save_link(self.user_b, "https://vk.com/artist/secret")
+
+    def test_search_matches_part_of_saved_url(self):
+        rows = search_links(self.user_a, "alpha")
+        self.assertEqual([row["url"] for row in rows], ["https://vk.com/artist/alpha"])
+
+    def test_search_isolated_per_user(self):
+        rows = search_links(self.user_a, "secret")
+        self.assertEqual(rows, [])
+
+    def test_search_returns_no_rows_for_empty_or_long_query(self):
+        self.assertEqual(search_links(self.user_a, "  "), [])
+        self.assertEqual(search_links(self.user_a, "x" * 81), [])
+
+    def test_like_wildcards_are_treated_literally(self):
+        save_link(self.user_a, "https://vk.com/track/100%_real")
+        self.assertEqual(search_links(self.user_a, "%_real")[0]["url"], "https://vk.com/track/100%_real")
 
 
 if __name__ == "__main__":
